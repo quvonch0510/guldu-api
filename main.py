@@ -1,7 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import requests
-from bs4 import BeautifulSoup
+import sys
+import os
+
+# Bot loyihangizdagi parser.py funksiyalarini ulash uchun
+# (Agar parser.py bitta papkada bo'lsa)
+from parser import get_schedule_text, search_group_id
 
 app = FastAPI()
 
@@ -18,57 +22,25 @@ def home():
     return {"message": "Guldu API ishlayapti!"}
 
 @app.get("/api/dars")
-def get_schedule():
-    url = "https://data.guldu.uz/dars"
+async def get_schedule(group: str = "9-24AT"):
+    """
+    Standart bo'yicha guruh nomini qabul qiladi va parser yordamida
+    to'g'ridan-to'g'ri GulDU bazasidan toza ma'lumot qaytaradi.
+    """
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
+        # Guruh ID raqamini topamiz (xuddi botdagi kabi)
+        group_id = await search_group_id(group)
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Sahifadagi barcha jadvallarni (table) qidirib topamiz
-        tables = soup.find_all('table')
-        
-        classes = []
-        
-        # Har bir jadvalni ko'rib chiqamiz
-        for table in tables:
-            # Jadval oldidagi matnda "Axborot texnologiyalari" bor-yo'qligini tekshiramiz
-            parent_text = table.parent.get_text() if table.parent else ""
-            
-            # Agar IT fakultetiga oid jadval topilsa yoki sahifada umuman jadval ko'p bo'lmasa
-            rows = table.find_all('tr')
-            for row in rows[1:]:
-                cols = row.find_all('td')
-                if len(cols) >= 4:
-                    classes.append({
-                        "time": cols[0].text.strip(),
-                        "subject": cols[1].text.strip(),
-                        "type": cols[2].text.strip(),
-                        "room": cols[3].text.strip()
-                    })
-            if classes:
-                break # Kerakli jadval topilsa, siklni to'xtatamiz
+        if not group_id:
+            return {"error": f"'{group}' guruhi topilmadi"}
 
-        # Agar maxsus shart bo'yicha topilmasa, sahifadagi birinchi topilgan jadvalni olib ko'ramiz
-        if not classes and tables:
-            rows = tables[0].find_all('tr')
-            for row in rows[1:]:
-                cols = row.find_all('td')
-                if len(cols) >= 4:
-                    classes.append({
-                        "time": cols[0].text.strip(),
-                        "subject": cols[1].text.strip(),
-                        "type": cols[2].text.strip(),
-                        "room": cols[3].text.strip()
-                    })
-
-        if not classes:
-            return {"error": "Sahifadan mos jadval topilmadi", "tables_found": len(tables)}
-
-        return classes
+        # Bot foydalanadigan parser orqali jadvalni matn yoki massiv shaklida olamiz
+        # Agar parseringiz JSON qaytarsa uni to'g'ridan-to'g'ri ishlatamiz
+        from parser import get_schedule_json # Agar parser.py da shunday funksiya bo'lsa
+        
+        # Yoki mavjud get_schedule_text dan foydalanamiz
+        schedule_text = await get_schedule_text(group_id, group, "haftalik")
+        
+        return {"group": group, "schedule": schedule_text}
     except Exception as e:
         return {"error": str(e)}
