@@ -1,1 +1,183 @@
+import aiohttp
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta, timezone
+import re
+import asyncio
 
+BASE_URL = "https://data.guldu.uz/dars"
+_CACHED_GROUPS = {}  
+_GROUP_FACULTY_MAP = {} 
+
+_ALL_SCHEDULES_CACHE = []
+_LAST_CACHE_TIME = None
+_IS_CACHING = False 
+_CACHE_STRUCT = {'faculties': None, 'forms': {}, 'courses': {}, 'groups': {}}
+
+def clear_all_caches():
+    global _CACHE_STRUCT, _CACHED_GROUPS, _GROUP_FACULTY_MAP, _ALL_SCHEDULES_CACHE, _LAST_CACHE_TIME
+    _CACHE_STRUCT = {'faculties': None, 'forms': {}, 'courses': {}, 'groups': {}}
+    _CACHED_GROUPS = {}
+    _GROUP_FACULTY_MAP = {}
+    _ALL_SCHEDULES_CACHE = []
+    _LAST_CACHE_TIME = None
+
+async def fetch_html(url: str, data: dict = None) -> str:
+    async with aiohttp.ClientSession() as session:
+        try:
+            if data:
+                async with session.post(url, data=data) as response:
+                    if response.status == 200: return await response.text()
+            else:
+                async with session.get(url) as response:
+                    if response.status == 200: return await response.text()
+        except Exception as e:
+            print(f"URL ga ulanishda xatolik: {e}")
+    return ""
+
+async def get_faculties() -> dict:
+    if _CACHE_STRUCT['faculties']: return _CACHE_STRUCT['faculties']
+    html = await fetch_html(f"{BASE_URL}/")
+    soup = BeautifulSoup(html, 'html.parser')
+    faculties = {}
+    for a in soup.find_all('a'):
+        fid = a.get('data-id')
+        name = a.text.strip()
+        if fid and name and name.lower() != "bosh sahifa":
+            faculties[fid] = name
+    _CACHE_STRUCT['faculties'] = faculties
+    return faculties
+
+async def get_forms(fakul_id: str) -> dict:
+    if fakul_id in _CACHE_STRUCT['forms']: return _CACHE_STRUCT['forms'][fakul_id]
+    html = await fetch_html(f"{BASE_URL}/category.php?fakul_id={fakul_id}")
+    soup = BeautifulSoup(html, 'html.parser')
+    forms = {}
+    for a in soup.find_all('a'):
+        href = a.get('href', '')
+        if 't_shakli_id=' in href:
+            tid = href.split('t_shakli_id=')[-1].split('&')[0]
+            forms[tid] = a.text.strip()
+    _CACHE_STRUCT['forms'][fakul_id] = forms
+    return forms
+
+async def get_courses(fakul_id: str, t_shakli_id: str) -> dict:
+    cache_key = f"{fakul_id}_{t_shakli_id}"
+    if cache_key in _CACHE_STRUCT['courses']: return _CACHE_STRUCT['courses'][cache_key]
+    html = await fetch_html(f"{BASE_URL}/kurs.php?fakul_id={fakul_id}&t_shakli_id={t_shakli_id}")
+    soup = BeautifulSoup(html, 'html.parser')
+    courses = {}
+    for a in soup.find_all('a'):
+        href = a.get('href', '')
+        if 'kursid=' in href:
+            kid = href.split('kursid=')[-1].split('&')[0]
+            courses[kid] = a.text.strip()
+    _CACHE_STRUCT['courses'][cache_key] = courses
+    return courses
+
+async def get_groups(fakul_id: str, t_shakli_id: str, kursid: str) -> dict:
+    cache_key = f"{fakul_id}_{t_shakli_id}_{kursid}"
+    if cache_key in _CACHE_STRUCT['groups']: return _CACHE_STRUCT['groups'][cache_key]
+    html = await fetch_html(f"{BASE_URL}/group.php?kursid={kursid}&fraculid={fakul_id}&t_shakli_id={t_shakli_id}")
+    soup = BeautifulSoup(html, 'html.parser')
+    groups = {}
+    for btn in soup.find_all('button', class_='btn'):
+        gid = btn.get('data-groupid')
+        name = " ".join(btn.text.split())
+        if gid and name:
+            groups[gid] = name
+    _CACHE_STRUCT['groups'][cache_key] = groups
+    return groups
+
+async def search_group_id(target_name: str) -> str:
+    global _CACHED_GROUPS, _GROUP_FACULTY_MAP
+    target = target_name.strip().upper()
+    
+    if not _CACHED_GROUPS:
+        facs = await get_faculties()
+        for fid, fname in facs.items():
+            forms = await get_forms(fid)
+            for tid in forms:
+                courses = await get_courses(fid, tid)
+                for kid in courses:
+                    groups = await get_groups(fid, tid, kid)
+                    for gid, gname in groups.items():
+                        g_upper = gname.upper()
+                        _CACHED_GROUPS[g_upper] = gid
+                        _GROUP_FACULTY_MAP[g_upper] = fname
+                        
+    return _CACHED_GROUPS.get(target)
+
+async def get_schedule_text(group_id: str, group_name: str, day_filter: str = "haftalik") -> str:
+    url = f"{BASE_URL}/ll.php"
+    html = await fetch_html(url, data={"datagroupid": str(group_id)})
+    
+    if not html.strip() or "dars jadvali" not in html.lower():
+        return "Bu guruh uchun hozircha dars jadvali kiritilmagan."
+
+    tz = timezone(timedelta(hours=5))
+    today_dt = datetime.now(tz)
+    tomorrow_dt = today_dt + timedelta(days=1)
+    
+    today_str = today_dt.strftime("%d.%m.%Y")
+    tomorrow_str = tomorrow_dt.strftime("%d.%m.%Y")
+
+    uz_days = {0: 'Dushanba', 1: 'Seshanba', 2: 'Chorshanba', 3: 'Payshanba', 4: 'Juma', 5: 'Shanba', 6: 'Yakshanba'}
+
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    if day_filter == "bugun": 
+        day_name = uz_days[today_dt.weekday()]
+        header_title = f"Bugungi darslar — {today_str} ({day_name})"
+    elif day_filter == "ertaga": 
+        day_name = uz_days[tomorrow_dt.weekday()]
+        header_title = f"Ertangi darslar — {tomorrow_str} ({day_name})"
+    else:
+        header_title = "To'liq haftalik dars jadvali"
+    
+    result_text = f"👥 Guruh: <a href='https://data.guldu.uz'><b>{group_name}</b></a>\n📆 {header_title}\n\n"
+    found_days = 0
+
+    cols = soup.find_all('div', class_='col-md-12')
+    for col in cols:
+        date_p = col.find('p', class_='bg-primary')
+        if date_p:
+            date_text = " ".join(date_p.text.split())
+            
+            if day_filter == "bugun" and today_str not in date_text: continue
+            if day_filter == "ertaga" and tomorrow_str not in date_text: continue
+            
+            found_days += 1
+            result_text += f"━━━━━━━━━━━━━━━━━━━━\n📅 <b>{date_text}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+
+        table = col.find('table')
+        if table and (day_filter == "haftalik" or (day_filter == "bugun" and today_str in date_text) or (day_filter == "ertaga" and tomorrow_str in date_text)):
+            time_th = table.find('th')
+            time_text = " ".join(time_th.text.split()) if time_th else "Vaqti noma'lum"
+
+            tds = table.find_all('td')
+            if len(tds) >= 3:
+                t_parts = list(tds[0].stripped_strings)
+                teacher = t_parts[-1] if len(t_parts) > 1 else "Noma'lum"
+
+                s_parts = list(tds[1].stripped_strings)
+                s_type = s_parts[0] if len(s_parts) > 1 else ""
+                s_name = " ".join(s_parts[1:]) if len(s_parts) > 1 else ""
+
+                r_parts = list(tds[2].stripped_strings)
+                room = " ".join(r_parts[1:]) if len(r_parts) > 1 else ""
+
+                s_type_emoji = "📘" if "ma'ruza" in s_type.lower() else "📗"
+                
+                result_text += f"⏰ {time_text} • {s_type_emoji} [{s_type}]\n"
+                result_text += f"📖 Fan: {s_name}\n"
+                result_text += f"👨‍🏫 O'qituvchi: {teacher}\n"
+                result_text += f"🏫 Auditoriya: {room}\n\n"
+
+    if found_days == 0:
+        if day_filter in ["bugun", "ertaga"]:
+            prefix = "Bugun" if day_filter == "bugun" else "Ertaga"
+            result_text += f"🌴 <i>{prefix} darslar mavjud emas (Dam olish kuni).</i>"
+        else:
+            result_text += f"Bunday sanada dars topilmadi 😴"
+
+    return result_text.strip()
