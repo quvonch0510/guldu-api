@@ -19,20 +19,37 @@ def home():
 
 @app.get("/api/dars")
 def get_schedule():
-    url = "https://data.guldu.uz/dars"
+    base_url = "https://data.guldu.uz/dars" # yoki asosiy sayt manzili
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(url, headers=headers)
+        response = requests.get(base_url, headers=headers)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        classes = []
+        # Fakultetlar ro'yxatidan "Axborot texnologiyalari..." havolasini qidiramiz
+        faculty_link = None
+        for a in soup.find_all('a', href=True):
+            if "Axborot texnologiyalari" in a.text or "fizika-matematika" in a.text:
+                faculty_link = a['href']
+                break
         
-        # 1-usul: Agar jadval table bo'lsa
+        # Agar havolani topa olmasa, yoki sahifa tuzilishi boshqacha bo'lsa
+        # To'g'ridan-to'g'ri shu sahifaning o'zida table bor-yo'qligini tekshiramiz
         table = soup.find('table')
+        
+        if not table and faculty_link:
+            # Agar fakultet havolasiga o'tish kerak bo'lsa
+            if not faculty_link.startswith('http'):
+                faculty_link = "https://data.guldu.uz/" + faculty_link.lstrip('/')
+            
+            fac_response = requests.get(faculty_link, headers=headers)
+            fac_soup = BeautifulSoup(fac_response.text, 'html.parser')
+            table = fac_soup.find('table')
+
+        classes = []
         if table:
             rows = table.find_all('tr')
             for row in rows[1:]:
@@ -45,12 +62,8 @@ def get_schedule():
                         "room": cols[3].text.strip()
                     })
         
-        # 2-usul: Agar table topilmasa, sahifadagi barcha qatorlarni yoki class'larni qidirib ko'ramiz
         if not classes:
-            # Saytning o'ziga xos tuzilmasini tekshirish uchun topilgan barcha elementlarni qaytaramiz
-            # Bu yerda jadval qanday tuzilganini aniqlaymiz
-            paragraphs = [p.text.strip() for p in soup.find_all(['div', 'span', 'li']) if p.text.strip()]
-            return {"error": "Jadval topilmadi", "html_Snippet": paragraphs[:10]}
+            return {"error": "Fakultet jadvali topilmadi, guruh havolasini aniqlash kerak"}
 
         return classes
     except Exception as e:
